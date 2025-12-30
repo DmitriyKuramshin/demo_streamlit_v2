@@ -1,10 +1,14 @@
+import os
 import streamlit as st
 import requests
 import json
 from typing import Optional
 
 # Configuration
-API_BASE_URL = "http://localhost:7860"
+API_BASE_URL = os.getenv(
+    "API_BASE_URL",
+    https://dmitriykuramshin-demoapi.hf.space
+)
 
 st.set_page_config(
     page_title="Hybrid Search & Organization Finder",
