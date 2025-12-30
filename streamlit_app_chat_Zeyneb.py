@@ -7,7 +7,7 @@ from typing import Optional
 # Configuration
 API_BASE_URL = os.getenv(
     "API_BASE_URL",
-    https://dmitriykuramshin-demoapi.hf.space
+    "https://dmitriykuramshin-demoapi.hf.space"
 )
 
 st.set_page_config(
