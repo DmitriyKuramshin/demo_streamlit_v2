@@ -2,13 +2,17 @@ import os
 import streamlit as st
 import requests
 import json
-from typing import Optional
+from typing import List
 
-# Configuration
+# =====================================================
+# CONFIGURATION
+# =====================================================
 API_BASE_URL = os.getenv(
     "API_BASE_URL",
     "https://dmitriykuramshin-demoapi.hf.space"
 )
+
+HEALTH_URL = f"{API_BASE_URL}/deep-health"
 
 st.set_page_config(
     page_title="Hybrid Search & Organization Finder",
@@ -16,438 +20,380 @@ st.set_page_config(
     layout="wide"
 )
 
+# =====================================================
+# UI HEADER
+# =====================================================
 st.title("🔍 Hybrid Search & Organization Finder")
-st.markdown("---")
+st.markdown(
+    """
+    This Streamlit app interacts with your **FastAPI hybrid search API**.  
+    It performs BM25 or vector-based hybrid searches over your HS code index.
+    """
+)
 
-# Sidebar for API health check
-with st.sidebar:
-    st.header("API Status")
-    if st.button("Check API Health"):
+# =====================================================
+# HELPER FUNCTIONS
+# =====================================================
+def search_api(
+    query: str,
+    size: int,
+    use_vector: bool,
+    alpha: float,
+    language: str,
+    use_spelling: bool = False
+):
+    # Apply spelling correction if enabled
+    search_query = query
+    if use_spelling:
         try:
-            response = requests.get(f"{API_BASE_URL}/health")
-            if response.status_code == 200:
-                st.success("✅ API is running")
-                
-                # Try deep health check
-                deep_health = requests.get(f"{API_BASE_URL}/deep-health")
-                if deep_health.status_code == 200:
-                    health_data = deep_health.json()
-                    st.json(health_data)
-            else:
-                st.error("❌ API is not responding")
-        except requests.exceptions.ConnectionError:
-            st.error("❌ Cannot connect to API. Make sure it's running on port 7860")
+            spell_response = requests.post(
+                f"{API_BASE_URL}/spellingcorrection",
+                json={"query": query},
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+            if spell_response.status_code == 200:
+                spell_data = spell_response.json()
+                corrected = spell_data.get("corrected_query", query)
+                if corrected != query:
+                    st.info(f"✨ Using corrected query: `{corrected}`")
+                    search_query = corrected
+        except Exception as e:
+            st.warning(f"Spelling correction unavailable: {e}")
     
-    st.markdown("---")
-    st.markdown("### Instructions")
-    st.markdown("""
-    1. Make sure FastAPI is running:
-       ```
-       docker run -p 7860:7860 fastapi
-       ```
-    2. Use the tabs above to search
-    """)
+    payload = {
+        "query": search_query,
+        "size": size,
+        "alpha": alpha,
+        "use_vector": use_vector
+    }
+    
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/search/{language}",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.Timeout:
+        st.error("⏱️ Request timed out. Please try again.")
+        return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ Request failed: {e}")
+        return None
 
-# Create tabs for different search types
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Hybrid Search AZE","Hybrid Search EN", "Hybrid Search RU","🏢 Organization Search"])
+def search_organizations(search_term: str, size: int):
+    payload = {
+        "search_term": search_term,
+        "index": "organizations_v3",
+        "size": size
+    }
+    
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/organizations",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ Request failed: {e}")
+        return None
 
-# Tab 1: Hybrid Search AZE
+# =====================================================
+# CREATE TABS
+# =====================================================
+tab1, tab2, tab3, tab4 = st.tabs(["🇦🇿 Search AZ", "🇬🇧 Search EN", "🇷🇺 Search RU", "🏢 Organization Search"])
+
+# =====================================================
+# TAB 1: AZERBAIJANI SEARCH
+# =====================================================
 with tab1:
-    st.header("Hybrid Search AZE")
-    st.markdown("Search using BM25 and vector embeddings")
+    st.header("Hybrid Search - Azerbaijani")
     
-    query = st.text_input("Enter your search query:", key="hybrid_query")
+    with st.form("search_form_az"):
+        query_az = st.text_input("Enter your search query:", placeholder="e.g. alüminium lövhələr")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            size_az = st.number_input("Number of results", min_value=1, max_value=50, value=10)
+        with col2:
+            alpha_az = st.slider("Vector weight (alpha)", 0.0, 1.0, 0.5, step=0.1, key="alpha_az")
+        with col3:
+            use_vector_az = st.checkbox("Use Vector Search", value=True, key="vector_az")
+        with col4:
+            use_spelling_az = st.checkbox("Spelling correction", value=False, key="spell_az")
+        
+        submitted_az = st.form_submit_button("Run Search")
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        size = st.number_input("Number of results:", min_value=1, max_value=100, value=10, key="hybrid_size")
-    with col2:
-        alpha = st.slider("Alpha (BM25 vs Vector weight):", 0.0, 1.0, 0.5, 0.1, key="hybrid_alpha")
-    with col3:
-        use_vector = st.checkbox("Use vector search", value=True, key="hybrid_vector")
-    with col4:
-        use_spelling = st.checkbox("Spelling correction", value=False, key="hybrid_spelling")
-    
-    if st.button("Search", key="hybrid_search_btn"):
-        if query:
-            search_query = query
-            
-            # Apply spelling correction if enabled
-            if use_spelling:
-                with st.spinner("Running spelling correction..."):
-                    try:
-                        spell_response = requests.post(
-                            f"{API_BASE_URL}/spellingcorrection",
-                            json={"query": query},
-                            headers={"Content-Type": "application/json"}
-                        )
-                        if spell_response.status_code == 200:
-                            spell_data = spell_response.json()
-                            corrected = spell_data.get("corrected_query", query)
-                            if corrected != query:
-                                st.info(f"Using corrected query: `{corrected}`")
-                                search_query = corrected
-                            else:
-                                st.info("Spelling correction did not change the query.")
-                        else:
-                            st.warning("Spelling correction failed, using original query.")
-                    except Exception as e:
-                        st.warning(f"Spelling correction error: {e}, using original query.")
-            
-            with st.spinner("Searching..."):
-                try:
-                    payload = {
-                        "query": search_query,
-                        "size": size,
-                        "alpha": alpha,
-                        "use_vector": use_vector
-                    }
-                    
-                    response = requests.post(
-                        f"{API_BASE_URL}/search/az",
-                        json=payload,
-                        headers={"Content-Type": "application/json"}
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.success(f"Found {data.get('total-hits', 0)} results")
-                        
-                        # Display results
-                        results = data.get('Ranked-objects', [])
-                        for result in results:
-                            score = result.get('_score')
-                            score_str = f"{score:.4f}" if score is not None else "N/A"
-                            
-                            # Try different possible structures for the data
-                            source = result.get('_source', result)
-                            
-                            # Get name_az_d4 from wherever it exists
-                            name_az = source.get('name_az_d4') or result.get('name_az_d4', 'N/A')
-                            
-                            with st.expander(f"{name_az}"):
-                                # DEBUG: Show all keys that contain 'expanded'
-                                expanded_keys = [k for k in source.keys() if 'expanded' in k.lower()]
-                                if expanded_keys:
-                                    st.info(f"Found expanded fields: {expanded_keys}")
-                                
-                                # Display name_az fields
-                                st.markdown(f"**name_az_d1:** {source.get('name_az_d1', 'N/A')}")
-                                st.markdown(f"**name_az_d2:** {source.get('name_az_d2', 'N/A')}")
-                                st.markdown(f"**name_az_d3:** {source.get('name_az_d3', 'N/A')}")
-                                st.markdown(f"**name_az_d4:** {source.get('name_az_d4', 'N/A')}")
-                                
-                                st.markdown("---")
-
-                                st.markdown(f"**name_az_d1_expanded:** {source.get('name_az_d1_expanded', 'N/A')}")
-                                st.markdown(f"**name_az_d2_expanded:** {source.get('name_az_d2_expanded', 'N/A')}")
-                                st.markdown(f"**name_az_d3_expanded:** {source.get('name_az_d3_expanded', 'N/A')}")
-                                st.markdown(f"**name_az_d4_expanded:** {source.get('name_az_d4_expanded', 'N/A')}")
-                                
-                                
-                                # Display all other fields
-                                for key, value in source.items():
-                                    if not key.startswith('_') and not key.startswith('name_az'):
-                                        st.markdown(f"**{key}:** {value}")
-                                
-                                st.markdown("---")
-                                st.markdown(f"**Score:** {score_str}")
-                                
-                                # Show full data with toggle
-                                if st.checkbox("Show Full JSON", key=f"json_{result.get('_id', hash(str(result)))}"):
-                                    st.json(result)
-                    else:
-                        st.error(f"Error: {response.status_code} - {response.text}")
-                except requests.exceptions.ConnectionError:
-                    st.error("❌ Cannot connect to API. Make sure it's running on port 7860")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
+    if submitted_az:
+        if not query_az.strip():
+            st.warning("⚠️ Please enter a query.")
         else:
-            st.warning("Please enter a search query")
+            with st.spinner("Searching..."):
+                result = search_api(query_az, size_az, use_vector_az, alpha_az, "az", use_spelling_az)
+            
+            if result:
+                st.success(f"✅ Found {result.get('total-hits', 0)} hits")
+                
+                hits: List[dict] = result.get("Ranked-objects", [])
+                if not hits:
+                    st.info("No results found.")
+                else:
+                    for i, hit in enumerate(hits, start=1):
+                        source = hit.get('_source', hit)
+                        name_display = source.get('name_az_d4', source.get('code', 'No Name'))
+                        
+                        with st.expander(f"#{i} - {name_display}"):
+                            col1, col2 = st.columns([3, 1])
+                            
+                            with col1:
+                                st.markdown(f"**Code:** `{source.get('code', 'N/A')}`")
+                                score = hit.get('_score') or source.get('score')
+                                if score:
+                                    st.markdown(f"**Score:** {score:.4f}")
+                                
+                                st.markdown(f"**Category (D1):** {source.get('name_az_d1', 'N/A')}")
+                                st.markdown(f"**Subcategory (D2):** {source.get('name_az_d2', 'N/A')}")
+                                st.markdown(f"**Sub-subcategory (D3):** {source.get('name_az_d3', 'N/A')}")
+                                st.markdown(f"**Product (D4):** {source.get('name_az_d4', 'N/A')}")
+                                st.markdown(f"**Full Path:** {source.get('Path', '-')}")
+                            
+                            with col2:
+                                tradings = source.get("tradings", [])
+                                if tradings:
+                                    st.markdown("**Tradings:**")
+                                    for t in tradings:
+                                        trade_type = t.get("tradeType", "N/A")
+                                        trade_name = t.get("tradeName", "N/A")
+                                        st.write(f"• {trade_name} ({trade_type})")
+                                        
+                                        if t.get("inVehicleId"):
+                                            st.write(f"  In: Vehicle {t.get('inVehicleId')}")
+                                        if t.get("outVehicleId"):
+                                            st.write(f"  Out: Vehicle {t.get('outVehicleId')}")
+                                else:
+                                    st.markdown("*No trading info*")
 
-
+# =====================================================
+# TAB 2: ENGLISH SEARCH
+# =====================================================
 with tab2:
-    st.header("Hybrid Search EN")
-    st.markdown("Search using BM25 and vector embeddings")
+    st.header("Hybrid Search - English")
     
-    query = st.text_input("Enter your search query:", key="hybrid_query_en")
+    with st.form("search_form_en"):
+        query_en = st.text_input("Enter your search query:", placeholder="e.g. aluminium sheets")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            size_en = st.number_input("Number of results", min_value=1, max_value=50, value=10)
+        with col2:
+            alpha_en = st.slider("Vector weight (alpha)", 0.0, 1.0, 0.5, step=0.1, key="alpha_en")
+        with col3:
+            use_vector_en = st.checkbox("Use Vector Search", value=True, key="vector_en")
+        with col4:
+            use_spelling_en = st.checkbox("Spelling correction", value=False, key="spell_en")
+        
+        submitted_en = st.form_submit_button("Run Search")
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        size = st.number_input("Number of results:", min_value=1, max_value=100, value=10, key="hybrid_size_en")
-    with col2:
-        alpha = st.slider("Alpha (BM25 vs Vector weight):", 0.0, 1.0, 0.5, 0.1, key="hybrid_alpha_en")
-    with col3:
-        use_vector = st.checkbox("Use vector search", value=True, key="hybrid_vector_en")
-    with col4:
-        use_spelling_en = st.checkbox("Spelling correction", value=False, key="hybrid_spelling_en")
-    
-    if st.button("Search", key="hybrid_search_btn_en"):
-        if query:
-            search_query = query
-            
-            # Apply spelling correction if enabled
-            if use_spelling_en:
-                with st.spinner("Running spelling correction..."):
-                    try:
-                        spell_response = requests.post(
-                            f"{API_BASE_URL}/spellingcorrection",
-                            json={"query": query},
-                            headers={"Content-Type": "application/json"}
-                        )
-                        if spell_response.status_code == 200:
-                            spell_data = spell_response.json()
-                            corrected = spell_data.get("corrected_query", query)
-                            if corrected != query:
-                                st.info(f"Using corrected query: `{corrected}`")
-                                search_query = corrected
-                            else:
-                                st.info("Spelling correction did not change the query.")
-                        else:
-                            st.warning("Spelling correction failed, using original query.")
-                    except Exception as e:
-                        st.warning(f"Spelling correction error: {e}, using original query.")
-            
-            with st.spinner("Searching..."):
-                try:
-                    payload = {
-                        "query": search_query,
-                        "size": size,
-                        "alpha": alpha,
-                        "use_vector": use_vector
-                    }
-                    
-                    response = requests.post(
-                        f"{API_BASE_URL}/search/en",
-                        json=payload,
-                        headers={"Content-Type": "application/json"}
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.success(f"Found {data.get('total-hits', 0)} results")
-                        
-                        # Display results
-                        results = data.get('Ranked-objects', [])
-                        for result in results:
-                            score = result.get('_score')
-                            score_str = f"{score:.4f}" if score is not None else "N/A"
-                            
-                            # Try different possible structures for the data
-                            source = result.get('_source', result)
-                            
-                            # Get name_en_d4 from wherever it exists
-                            name_en = source.get('name_en_d4') or result.get('name_en_d4', 'N/A')
-                            
-                            with st.expander(f"{name_en}"):
-                                # DEBUG: Show all keys that contain 'expanded'
-                                expanded_keys = [k for k in source.keys() if 'expanded' in k.lower()]
-                                if expanded_keys:
-                                    st.info(f"Found expanded fields: {expanded_keys}")
-                                
-                                # Display name_en fields
-                                st.markdown(f"**name_en_d1:** {source.get('name_en_d1', 'N/A')}")
-                                st.markdown(f"**name_en_d2:** {source.get('name_en_d2', 'N/A')}")
-                                st.markdown(f"**name_en_d3:** {source.get('name_en_d3', 'N/A')}")
-                                st.markdown(f"**name_en_d4:** {source.get('name_en_d4', 'N/A')}")
-                                
-                                st.markdown("---")
-
-                                st.markdown(f"**name_en_d1_expanded:** {source.get('name_en_d1_expanded', 'N/A')}")
-                                st.markdown(f"**name_en_d2_expanded:** {source.get('name_en_d2_expanded', 'N/A')}")
-                                st.markdown(f"**name_en_d3_expanded:** {source.get('name_en_d3_expanded', 'N/A')}")
-                                st.markdown(f"**name_en_d4_expanded:** {source.get('name_en_d4_expanded', 'N/A')}")
-                                
-                                
-                                # Display all other fields
-                                for key, value in source.items():
-                                    if not key.startswith('_') and not key.startswith('name_en'):
-                                        st.markdown(f"**{key}:** {value}")
-                                
-                                st.markdown("---")
-                                st.markdown(f"**Score:** {score_str}")
-                                
-                                # Show full data with toggle
-                                if st.checkbox("Show Full JSON", key=f"json_{result.get('_id', hash(str(result)))}"):
-                                    st.json(result)
-                    else:
-                        st.error(f"Error: {response.status_code} - {response.text}")
-                except requests.exceptions.ConnectionError:
-                    st.error("❌ Cannot connect to API. Make sure it's running on port 7860")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
+    if submitted_en:
+        if not query_en.strip():
+            st.warning("⚠️ Please enter a query.")
         else:
-            st.warning("Please enter a search query")
+            with st.spinner("Searching..."):
+                result = search_api(query_en, size_en, use_vector_en, alpha_en, "en", use_spelling_en)
+            
+            if result:
+                st.success(f"✅ Found {result.get('total-hits', 0)} hits")
+                
+                hits: List[dict] = result.get("Ranked-objects", [])
+                if not hits:
+                    st.info("No results found.")
+                else:
+                    for i, hit in enumerate(hits, start=1):
+                        source = hit.get('_source', hit)
+                        name_display = source.get('name_en_d4', source.get('code', 'No Name'))
+                        
+                        with st.expander(f"#{i} - {name_display}"):
+                            col1, col2 = st.columns([3, 1])
+                            
+                            with col1:
+                                st.markdown(f"**Code:** `{source.get('code', 'N/A')}`")
+                                score = hit.get('_score') or source.get('score')
+                                if score:
+                                    st.markdown(f"**Score:** {score:.4f}")
+                                
+                                st.markdown(f"**Category (D1):** {source.get('name_en_d1', 'N/A')}")
+                                st.markdown(f"**Subcategory (D2):** {source.get('name_en_d2', 'N/A')}")
+                                st.markdown(f"**Sub-subcategory (D3):** {source.get('name_en_d3', 'N/A')}")
+                                st.markdown(f"**Product (D4):** {source.get('name_en_d4', 'N/A')}")
+                                st.markdown(f"**Full Path:** {source.get('Path', '-')}")
+                            
+                            with col2:
+                                tradings = source.get("tradings", [])
+                                if tradings:
+                                    st.markdown("**Tradings:**")
+                                    for t in tradings:
+                                        trade_type = t.get("tradeType", "N/A")
+                                        trade_name = t.get("tradeName", "N/A")
+                                        st.write(f"• {trade_name} ({trade_type})")
+                                        
+                                        if t.get("inVehicleId"):
+                                            st.write(f"  In: Vehicle {t.get('inVehicleId')}")
+                                        if t.get("outVehicleId"):
+                                            st.write(f"  Out: Vehicle {t.get('outVehicleId')}")
+                                else:
+                                    st.markdown("*No trading info*")
 
+# =====================================================
+# TAB 3: RUSSIAN SEARCH
+# =====================================================
 with tab3:
-    st.header("Hybrid Search RU")
-    st.markdown("Search using BM25 and vector embeddings")
+    st.header("Hybrid Search - Russian")
     
-    query = st.text_input("Enter your search query:", key="hybrid_query_ru")
+    with st.form("search_form_ru"):
+        query_ru = st.text_input("Enter your search query:", placeholder="e.g. алюминиевые листы")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            size_ru = st.number_input("Number of results", min_value=1, max_value=50, value=10)
+        with col2:
+            alpha_ru = st.slider("Vector weight (alpha)", 0.0, 1.0, 0.5, step=0.1, key="alpha_ru")
+        with col3:
+            use_vector_ru = st.checkbox("Use Vector Search", value=True, key="vector_ru")
+        with col4:
+            use_spelling_ru = st.checkbox("Spelling correction", value=False, key="spell_ru")
+        
+        submitted_ru = st.form_submit_button("Run Search")
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        size = st.number_input("Number of results:", min_value=1, max_value=100, value=10, key="hybrid_size_ru")
-    with col2:
-        alpha = st.slider("Alpha (BM25 vs Vector weight):", 0.0, 1.0, 0.5, 0.1, key="hybrid_alpha_ru")
-    with col3:
-        use_vector = st.checkbox("Use vector search", value=True, key="hybrid_vector_ru")
-    with col4:
-        use_spelling_ru = st.checkbox("Spelling correction", value=False, key="hybrid_spelling_ru")
-    
-    if st.button("Search", key="hybrid_search_btn_ru"):
-        if query:
-            search_query = query
-            
-            # Apply spelling correction if enabled
-            if use_spelling_ru:
-                with st.spinner("Running spelling correction..."):
-                    try:
-                        spell_response = requests.post(
-                            f"{API_BASE_URL}/spellingcorrection",
-                            json={"query": query},
-                            headers={"Content-Type": "application/json"}
-                        )
-                        if spell_response.status_code == 200:
-                            spell_data = spell_response.json()
-                            corrected = spell_data.get("corrected_query", query)
-                            if corrected != query:
-                                st.info(f"Using corrected query: `{corrected}`")
-                                search_query = corrected
-                            else:
-                                st.info("Spelling correction did not change the query.")
-                        else:
-                            st.warning("Spelling correction failed, using original query.")
-                    except Exception as e:
-                        st.warning(f"Spelling correction error: {e}, using original query.")
-            
-            with st.spinner("Searching..."):
-                try:
-                    payload = {
-                        "query": search_query,
-                        "size": size,
-                        "alpha": alpha,
-                        "use_vector": use_vector
-                    }
-                    
-                    response = requests.post(
-                        f"{API_BASE_URL}/search/ru",
-                        json=payload,
-                        headers={"Content-Type": "application/json"}
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.success(f"Found {data.get('total-hits', 0)} results")
-                        
-                        # Display results
-                        results = data.get('Ranked-objects', [])
-                        for result in results:
-                            score = result.get('_score')
-                            score_str = f"{score:.4f}" if score is not None else "N/A"
-                            
-                            # Try different possible structures for the data
-                            source = result.get('_source', result)
-                            
-                            # Get name_en_d4 from wherever it exists
-                            name_en = source.get('name_ru_d4') or result.get('name_ru_d4', 'N/A')
-                            
-                            with st.expander(f"{name_en}"):
-                                # DEBUG: Show all keys that contain 'expanded'
-                                expanded_keys = [k for k in source.keys() if 'expanded' in k.lower()]
-                                if expanded_keys:
-                                    st.info(f"Found expanded fields: {expanded_keys}")
-                                
-                                # Display name_en fields
-                                st.markdown(f"**name_ru_d1:** {source.get('name_ru_d1', 'N/A')}")
-                                st.markdown(f"**name_ru_d2:** {source.get('name_ru_d2', 'N/A')}")
-                                st.markdown(f"**name_ru_d3:** {source.get('name_ru_d3', 'N/A')}")
-                                st.markdown(f"**name_ru_d4:** {source.get('name_ru_d4', 'N/A')}")
-                                
-                                st.markdown("---")
-
-                                st.markdown(f"**name_ru_d1_expanded:** {source.get('name_ru_d1_expanded', 'N/A')}")
-                                st.markdown(f"**name_ru_d2_expanded:** {source.get('name_ru_d2_expanded', 'N/A')}")
-                                st.markdown(f"**name_ru_d3_expanded:** {source.get('name_ru_d3_expanded', 'N/A')}")
-                                st.markdown(f"**name_ru_d4_expanded:** {source.get('name_ru_d4_expanded', 'N/A')}")
-                                
-                                
-                                # Display all other fields
-                                for key, value in source.items():
-                                    if not key.startswith('_') and not key.startswith('name_ru'):
-                                        st.markdown(f"**{key}:** {value}")
-                                
-                                st.markdown("---")
-                                st.markdown(f"**Score:** {score_str}")
-                                
-                                # Show full data with toggle
-                                if st.checkbox("Show Full JSON", key=f"json_{result.get('_id', hash(str(result)))}"):
-                                    st.json(result)
-                    else:
-                        st.error(f"Error: {response.status_code} - {response.text}")
-                except requests.exceptions.ConnectionError:
-                    st.error("❌ Cannot connect to API. Make sure it's running on port 7860")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
+    if submitted_ru:
+        if not query_ru.strip():
+            st.warning("⚠️ Please enter a query.")
         else:
-            st.warning("Please enter a search query")
+            with st.spinner("Searching..."):
+                result = search_api(query_ru, size_ru, use_vector_ru, alpha_ru, "ru", use_spelling_ru)
+            
+            if result:
+                st.success(f"✅ Found {result.get('total-hits', 0)} hits")
+                
+                hits: List[dict] = result.get("Ranked-objects", [])
+                if not hits:
+                    st.info("No results found.")
+                else:
+                    for i, hit in enumerate(hits, start=1):
+                        source = hit.get('_source', hit)
+                        name_display = source.get('name_ru_d4', source.get('code', 'No Name'))
+                        
+                        with st.expander(f"#{i} - {name_display}"):
+                            col1, col2 = st.columns([3, 1])
+                            
+                            with col1:
+                                st.markdown(f"**Code:** `{source.get('code', 'N/A')}`")
+                                score = hit.get('_score') or source.get('score')
+                                if score:
+                                    st.markdown(f"**Score:** {score:.4f}")
+                                
+                                st.markdown(f"**Category (D1):** {source.get('name_ru_d1', 'N/A')}")
+                                st.markdown(f"**Subcategory (D2):** {source.get('name_ru_d2', 'N/A')}")
+                                st.markdown(f"**Sub-subcategory (D3):** {source.get('name_ru_d3', 'N/A')}")
+                                st.markdown(f"**Product (D4):** {source.get('name_ru_d4', 'N/A')}")
+                                st.markdown(f"**Full Path:** {source.get('Path', '-')}")
+                            
+                            with col2:
+                                tradings = source.get("tradings", [])
+                                if tradings:
+                                    st.markdown("**Tradings:**")
+                                    for t in tradings:
+                                        trade_type = t.get("tradeType", "N/A")
+                                        trade_name = t.get("tradeName", "N/A")
+                                        st.write(f"• {trade_name} ({trade_type})")
+                                        
+                                        if t.get("inVehicleId"):
+                                            st.write(f"  In: Vehicle {t.get('inVehicleId')}")
+                                        if t.get("outVehicleId"):
+                                            st.write(f"  Out: Vehicle {t.get('outVehicleId')}")
+                                else:
+                                    st.markdown("*No trading info*")
 
-# Tab 4: Organization Search
+# =====================================================
+# TAB 4: ORGANIZATION SEARCH
+# =====================================================
 with tab4:
     st.header("Organization Search")
-    st.markdown("Search for organizations by name or abbreviation")
     
-    search_term = st.text_input("Enter organization name or abbreviation:", key="org_query")
+    with st.form("search_form_org"):
+        search_term = st.text_input("Enter organization name or abbreviation:", placeholder="e.g. UN")
+        org_size = st.number_input("Number of results", min_value=1, max_value=50, value=10)
+        st.info("🔒 Index: organizations_v3 (fixed)")
+        
+        submitted_org = st.form_submit_button("Search Organizations")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        org_size = st.number_input("Number of results:", min_value=1, max_value=100, value=10, key="org_size")
-    with col2:
-        org_index = st.text_input("Index name:", value="organizations_v3", key="org_index")
-    
-    if st.button("Search Organizations", key="org_search_btn"):
-        if search_term:
-            with st.spinner("Searching organizations..."):
-                try:
-                    payload = {
-                        "search_term": search_term,
-                        "index": org_index,
-                        "size": org_size
-                    }
-                    
-                    response = requests.post(
-                        f"{API_BASE_URL}/organizations",
-                        json=payload,
-                        headers={"Content-Type": "application/json"}
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.success(f"Found {data.get('total-hits', 0)} organizations")
-                        
-                        # Display results in a more structured way
-                        results = data.get('results', [])
-                        for idx, org in enumerate(results, 1):
-                            with st.expander(f"Organization {idx} - {org.get('name', 'N/A')}"):
-                                col_a, col_b = st.columns(2)
-                                with col_a:
-                                    st.markdown(f"**Name:** {org.get('name', 'N/A')}")
-                                    st.markdown(f"**Abbreviation:** {org.get('abbreviation', 'N/A')}")
-                                    st.markdown(f"**Score:** {org.get('score', 'N/A')}")
-                                with col_b:
-                                    st.markdown(f"**ID:** {org.get('id', 'N/A')}")
-                                    if org.get('additional_info'):
-                                        st.markdown("**Additional Info:**")
-                                        st.json(org.get('additional_info'))
-                    else:
-                        st.error(f"Error: {response.status_code} - {response.text}")
-                except requests.exceptions.ConnectionError:
-                    st.error("❌ Cannot connect to API. Make sure it's running on port 7860")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
+    if submitted_org:
+        if not search_term.strip():
+            st.warning("⚠️ Please enter a search term.")
         else:
-            st.warning("Please enter a search term")
+            with st.spinner("Searching organizations..."):
+                result = search_organizations(search_term, org_size)
+            
+            if result:
+                st.success(f"✅ Found {result.get('total-hits', 0)} organizations")
+                
+                orgs: List[dict] = result.get("results", [])
+                if not orgs:
+                    st.info("No results found.")
+                else:
+                    for i, org in enumerate(orgs, start=1):
+                        with st.expander(f"#{i} - {org.get('name', 'N/A')}"):
+                            col1, col2 = st.columns([2, 1])
+                            
+                            with col1:
+                                st.markdown(f"**Name:** {org.get('name', 'N/A')}")
+                                st.markdown(f"**Abbreviation:** {org.get('abbreviation', 'N/A')}")
+                                st.markdown(f"**ID:** {org.get('id', 'N/A')}")
+                            
+                            with col2:
+                                score = org.get('score')
+                                if score:
+                                    st.markdown(f"**Score:** {score:.4f}")
+                                
+                                if org.get('additional_info'):
+                                    st.markdown("**Additional Info:**")
+                                    st.json(org.get('additional_info'))
 
-# Footer
+# =====================================================
+# SIDEBAR - API HEALTH CHECK
+# =====================================================
+with st.sidebar:
+    st.header("API Status")
+    
+    if st.button("Check API Health"):
+        try:
+            health_response = requests.get(HEALTH_URL, timeout=5)
+            if health_response.status_code == 200:
+                health_data = health_response.json()
+                st.success("✅ API is reachable")
+                st.json(health_data)
+            else:
+                st.error(f"⚠️ API returned status: {health_response.status_code}")
+        except requests.exceptions.RequestException as e:
+            st.error(f"❌ Cannot connect to API: {e}")
+    
+    st.markdown("---")
+    st.markdown("### Search Tips")
+    st.markdown("""
+    - **BM25 only**: Uncheck "Use Vector Search"
+    - **Hybrid search**: Check "Use Vector Search" and adjust alpha
+    - **Alpha = 0.0**: Pure BM25
+    - **Alpha = 1.0**: Pure vector similarity
+    - **Alpha = 0.5**: Balanced hybrid
+    """)
+
+# =====================================================
+# FOOTER
+# =====================================================
 st.markdown("---")
-st.markdown("Built with Streamlit 🎈 | Powered by FastAPI ⚡")
+st.caption("© 2025 Hybrid Search Demo - FastAPI + Streamlit + Elasticsearch")
